@@ -2,6 +2,7 @@ name          = "fuzzy"
 version       = "0.1.0"
 description   = "Fuzzy matching like an editor's quick open: a query's letters in order anywhere in a text, scored (word starts, runs, path names), with the matched positions to highlight."
 license       = "MIT"
+repository    = "github.com/AlexVachon/quirk-fuzzy"
 quirk-version = ">=7.61.0"
 
 [deps]
