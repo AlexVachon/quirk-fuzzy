@@ -1,0 +1,84 @@
+use fuzzy
+use test
+
+define pos(m: fuzzy.Match) -> String {
+    out := []
+    for p in m.positions { out.append(String(p)) }
+    return ",".join(out)
+}
+
+define texts(ms: List) -> String {
+    out := []
+    for x in ms {
+        m: fuzzy.Match = x
+        out.append(m.text)
+    }
+    return " | ".join(out)
+}
+
+define test_in_order_any_case() -> void {
+    test.assert_true(fuzzy.find("abc", "a_b_c") != null)
+    test.assert_true(fuzzy.find("ABC", "xaybzc") != null)
+    test.assert_true(fuzzy.find("acb", "abc") == null)            // out of order
+    test.assert_true(fuzzy.find("abcd", "abc") == null)           // longer than the text
+    test.assert_eq(fuzzy.find("", "anything").score, 0)
+    test.assert_eq(pos(fuzzy.find("open file", "File: Open File")), "6,7,8,9,11,12,13,14")
+}
+
+define test_word_starts_and_runs_win() -> void {
+    // The letters at word starts, not the first ones met.
+    test.assert_eq(pos(fuzzy.find("ot", "toggle terminal opener tab")), "16,23")
+    test.assert_eq(pos(fuzzy.find("tt", "toggle terminal")), "0,7")
+    // camelCase humps.
+    test.assert_eq(pos(fuzzy.find("gfn", "getFileName")), "0,3,7")
+    // A run beats letters spread out.
+    a := fuzzy.find("term", "terminal")
+    b := fuzzy.find("term", "t-e-r-m")
+    test.assert_true(a.score > b.score)
+    // An early start beats a late one.
+    test.assert_true(fuzzy.find("ab", "ab cd").score > fuzzy.find("ab", "cd cd cd cd cd cd ab").score)
+}
+
+define test_paths_prefer_the_file_name() -> void {
+    m := fuzzy.find_path("ide", "quirk-ide/src/ide.qk")
+    test.assert_eq(pos(m), "14,15,16")
+    m2 := fuzzy.find_path("ide", "src\\ide.qk")                   // Windows separator
+    test.assert_eq(pos(m2), "4,5,6")
+    got := fuzzy.filter("ide", ["docs/guide.md", "src/ide.qk", "tests/ide_test.qk", "README.md"], paths=true)
+    test.assert_eq(texts(got), "src/ide.qk | tests/ide_test.qk | docs/guide.md")
+    // A query with a / matches the folders too.
+    got2 := fuzzy.filter("s/i", ["tests/ide_test.qk", "src/ide.qk"], paths=true)
+    test.assert_eq(texts(got2), "src/ide.qk | tests/ide_test.qk")
+}
+
+define test_filter_order_key_limit() -> void {
+    cmds := ["View: Toggle Terminal", "File: Save", "File: Save As", "Terminal: Kill"]
+    test.assert_eq(texts(fuzzy.filter("save", cmds)), "File: Save | File: Save As")
+    test.assert_eq(texts(fuzzy.filter("", cmds)), "View: Toggle Terminal | File: Save | File: Save As | Terminal: Kill")
+    test.assert_eq(fuzzy.filter("term", cmds, limit=1).length(), 1)
+    words := [[1, "alpha"], [2, "beta"], [3, "alphabet"]]
+    got := fuzzy.filter("alp", words, key=fn(w) {
+        pair: List = w
+        return pair[1]
+    })
+    test.assert_eq(texts(got), "alpha | alphabet")
+    first: fuzzy.Match = got[0]
+    item: List = first.item
+    test.assert_eq(item[0], 1)
+    test.assert_eq(first.index, 0)
+}
+
+define test_runs() -> void {
+    rs := fuzzy.runs("src/ide.qk", [4, 5, 6])
+    out := []
+    for r in rs {
+        pair: List = r
+        on: Bool = pair[1]
+        out.append((on ? "[" : "") + String(pair[0]) + (on ? "]" : ""))
+    }
+    test.assert_eq("".join(out), "src/[ide].qk")
+    test.assert_eq(fuzzy.runs("abc", []).length(), 1)
+    test.assert_eq(fuzzy.runs("", []).length(), 0)
+    whole := fuzzy.runs("ab", [0, 1])
+    test.assert_eq(whole.length(), 1)
+}

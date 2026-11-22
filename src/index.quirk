@@ -1,0 +1,310 @@
+// fuzzy: match a query's letters, in order, anywhere in a text — the way an
+// editor's quick open (Ctrl+P) and command palette find "idqk" in
+// "src/ide.qk". Matches are scored so the best come first: letters at word
+// starts (after / _ - . or a space, a camelCase hump), runs of letters, an
+// early start, and (for paths) letters all in the file's name score more.
+
+// The scores (tuned like fzf's / VS Code's: a match is worth more than any
+// gap costs, a word start more than a run).
+_MATCH := 16
+_RUN := 8                // the letter right after the previous one
+_START := 10             // the text's first letter
+_SEP := 9                // after / or \
+_WORD := 8               // after _ - . : or a space
+_HUMP := 7               // an upper-case letter after a lower-case one
+_CASE := 1               // the same case as typed
+_GAP := 3                // a gap's first letter
+_GAP_MORE := 1           // each further letter of a gap
+_LEAD := 3              // at most this much lost for letters before the first match
+_NAME := 30              // a path's query matched in its file name alone
+_NONE := -1000000000
+
+---
+A match: its `score` (higher is better) and `positions`, the character
+indices in the text of the query's letters (for drawing them bold). From
+`filter`, also the `item` matched, its `index` in the list and its `text`.
+---
+struct Match {
+    score: Int
+    positions: List
+    item: Any
+    index: Int
+    text: String
+
+    define __init(self, score: Int, positions: List) -> void {
+        self.score = score
+        self.positions = positions
+        self.item = null
+        self.index = -1
+        self.text = ""
+    }
+}
+
+define _lower(c: Int) -> Int {
+    if c >= 65 and c <= 90 { return c + 32 }
+    return c
+}
+
+define _is_upper(c: Int) -> Bool {
+    return c >= 65 and c <= 90
+}
+
+define _is_lower(c: Int) -> Bool {
+    return (c >= 97 and c <= 122)
+}
+
+// What letter j of the text is worth beyond a plain match.
+define _bonus(t: List, j: Int) -> Int {
+    if j == 0 { return _START }
+    p: Int = t[j - 1]
+    c: Int = t[j]
+    if p == 47 or p == 92 { return _SEP }                              // / \
+    if p == 95 or p == 45 or p == 46 or p == 58 or p == 32 { return _WORD }   // _ - . : space
+    if _is_lower(p) and _is_upper(c) { return _HUMP }
+    if not (_is_lower(p) or _is_upper(p) or (p >= 48 and p <= 57)) and (_is_lower(c) or _is_upper(c)) { return _WORD }
+    return 0
+}
+
+// The query's letters (spaces left out: "open file" finds "Open File").
+define _query(query: String) -> List {
+    out := []
+    for c in query.codes() {
+        code: Int = c
+        if code != 32 and code != 9 { out.append(code) }
+    }
+    return out
+}
+
+---
+Match `query` against `text`, ignoring case: null if its letters aren't
+all in the text in order, else the best-scoring `Match`. An empty query
+matches anything with score 0.
+---
+define find(query: String, text: String) -> Match {
+    return _match_codes(_query(query), text.codes())
+}
+
+define _match_codes(q: List, t: List) -> Match {
+    n := q.length()
+    if n == 0 { return Match(0, []) }
+    m := t.length()
+    if n > m { return null }
+    ql := []
+    for c in q {
+        code: Int = c
+        ql.append(_lower(code))
+    }
+    tl := []
+    for c in t {
+        code: Int = c
+        tl.append(_lower(code))
+    }
+    // Quick no: not even in order once.
+    k := 0
+    j := 0
+    while j < m and k < n {
+        a: Int = tl[j]
+        b: Int = ql[k]
+        if a == b { k = k + 1 }
+        j = j + 1
+    }
+    if k < n { return null }
+    // best[i*m + j]: the best score with query letter i at text letter j;
+    // came[i*m + j]: where letter i-1 was then.
+    size := n * m
+    best := []
+    came := []
+    j = 0
+    while j < size {
+        best.append(_NONE)
+        came.append(-1)
+        j = j + 1
+    }
+    i := 0
+    while i < n {
+        qc: Int = ql[i]
+        qo: Int = q[i]
+        gap := _NONE            // the best letter i-1 at least 2 back, less its gap
+        gap_at := -1
+        j = i
+        while j < m {
+            if i > 0 and j >= 2 {
+                if gap > _NONE { gap = gap - _GAP_MORE }
+                before: Int = best[(i - 1) * m + j - 2]
+                if before > _NONE and before - _GAP > gap {
+                    gap = before - _GAP
+                    gap_at = j - 2
+                }
+            }
+            tc: Int = tl[j]
+            if tc == qc {
+                to: Int = t[j]
+                here := _MATCH + _bonus(t, j)
+                if to == qo { here = here + _CASE }
+                if i == 0 {
+                    lead := j < _LEAD ? j : _LEAD
+                    best[j] = here - lead
+                } else {
+                    score := _NONE
+                    back := -1
+                    prev: Int = best[(i - 1) * m + j - 1]
+                    if prev > _NONE {
+                        score = prev + _RUN
+                        back = j - 1
+                    }
+                    if gap > score {
+                        score = gap
+                        back = gap_at
+                    }
+                    if score > _NONE {
+                        best[i * m + j] = score + here
+                        came[i * m + j] = back
+                    }
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    top := _NONE
+    at := -1
+    j = n - 1
+    while j < m {
+        s: Int = best[(n - 1) * m + j]
+        if s > top {
+            top = s
+            at = j
+        }
+        j = j + 1
+    }
+    if at < 0 { return null }
+    pos := []
+    i = n - 1
+    while i >= 0 {
+        pos.append(at)
+        at = came[i * m + at]
+        i = i - 1
+    }
+    return Match(top, pos.reverse())
+}
+
+---
+Match `query` against a file path: like `find`, but a query found in the
+file's name alone ("ide" in "src/ide.qk") scores more than one spread over
+the folders. Both separators count (`src\ide.qk`).
+---
+define find_path(query: String, path: String) -> Match {
+    q := _query(query)
+    t := path.codes()
+    whole := _match_codes(q, t)
+    if whole == null or q.length() == 0 { return whole }
+    for c in q {
+        code: Int = c
+        if code == 47 or code == 92 { return whole }       // the query names folders itself
+    }
+    start := 0
+    j := 0
+    while j < t.length() {
+        c: Int = t[j]
+        if c == 47 or c == 92 { start = j + 1 }
+        j = j + 1
+    }
+    if start == 0 { return whole }
+    name := []
+    j = start
+    while j < t.length() {
+        name.append(t[j])
+        j = j + 1
+    }
+    in_name := _match_codes(q, name)
+    if in_name == null { return whole }
+    score := in_name.score + _NAME - _START + _SEP       // (its first letter is after a /, not the text's start)
+    if score <= whole.score { return whole }
+    pos := []
+    for p in in_name.positions {
+        at: Int = p
+        pos.append(at + start)
+    }
+    return Match(score, pos)
+}
+
+---
+The `items` that match `query`, best first, as `Match`es (`item`,
+`index`, `text`, `score`, `positions`). `key(item) -> String` gives an
+item's text (default: `String(item)`); `paths=true` scores them with
+`find_path`. Ties go to the shorter text, then to the earlier item. An
+empty query keeps every item, in order. `limit` > 0 keeps only that many.
+---
+define filter(query: String, items: List, key: Callable = null, paths: Bool = false, limit: Int = 0) -> List {
+    q := _query(query)
+    out := []
+    i := 0
+    for it in items {
+        text := key != null ? String(key(it)) : String(it)
+        mt: Match = null
+        if q.length() == 0 {
+            mt = Match(0, [])
+        } elif paths {
+            mt = find_path(query, text)
+        } else {
+            mt = _match_codes(q, text.codes())
+        }
+        if mt != null {
+            mt.item = it
+            mt.index = i
+            mt.text = text
+            out.append(mt)
+        }
+        i = i + 1
+    }
+    if q.length() > 0 {
+        out.sort(fn(a, b) {
+            x: Match = a
+            y: Match = b
+            if x.score != y.score { return y.score - x.score }
+            if x.text.length() != y.text.length() { return x.text.length() - y.text.length() }
+            return x.index - y.index
+        })
+    }
+    if limit > 0 and out.length() > limit {
+        kept := []
+        i = 0
+        while i < limit {
+            kept.append(out[i])
+            i = i + 1
+        }
+        return kept
+    }
+    return out
+}
+
+---
+`text` cut into runs: [[piece, matched], ...] by `positions` (sorted
+character indices) — draw the matched pieces in another colour or bold.
+---
+define runs(text: String, positions: List) -> List {
+    out := []
+    if positions.length() == 0 {
+        if text.length() > 0 { out.append([text, false]) }
+        return out
+    }
+    marked := {}
+    for p in positions {
+        at: Int = p
+        marked[String(at)] = true
+    }
+    start := 0
+    on := marked.has("0")
+    i := 1
+    n := text.length()
+    while i <= n {
+        here := i < n and marked.has(String(i))
+        if i == n or here != on {
+            out.append([text.substring(start, i), on])
+            start = i
+            on = here
+        }
+        i = i + 1
+    }
+    return out
+}
